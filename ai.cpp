@@ -11,19 +11,19 @@
 #include <iomanip>
 #include <limits>
 
-#include "lib/kv_cache.h"
-#include "lib/rms_norm.h"
-#include "lib/linear.h"
-#include "lib/rope.h"
-#include "lib/embedding.h"
-#include "lib/cross_entropy.h"
-#include "lib/model_args.h"
-#include "lib/feed_forward.h"
-#include "lib/model.h"
-#include "lib/optimizer.h"
-#include "lib/transformer.h"
-#include "lib/tokenizer.h"
-#include "lib/generator.h"
+#include "lib/kv_cache.cpp"
+#include "lib/rms_norm.cpp"
+#include "lib/linear.cpp"
+#include "lib/rope.cpp"
+#include "lib/embedding.cpp"
+#include "lib/cross_entropy.cpp"
+#include "lib/model_args.cpp"
+#include "lib/feed_forward.cpp"
+#include "lib/model.cpp"
+#include "lib/optimizer.cpp"
+#include "lib/transformer.cpp"
+#include "lib/tokenizer.cpp"
+#include "lib/generator.cpp"
 
 using namespace mlx::core;
 

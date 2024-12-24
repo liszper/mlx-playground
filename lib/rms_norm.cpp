@@ -1,18 +1,29 @@
-#include "rms_norm.h"
+#pragma once
 
-RMSNorm::RMSNorm(int dim, float eps) 
-    : weight(ones({dim}, float32)), 
-      eps(eps) {}
+#include <mlx/mlx.h>
 
-array RMSNorm::forward(const array& x) {
-    array variance = mean(square(x), -1, true);
-    return x * rsqrt(variance + eps) * weight;
-}
+using namespace mlx::core;
 
-const array& RMSNorm::get_weight() const { 
-    return weight; 
-}
+class RMSNorm {
+private:
+    array weight;
+    float eps;
 
-void RMSNorm::set_weight(const array& w) { 
-    weight = w; 
-} 
+public:
+    RMSNorm(int dim, float eps = 1e-6) 
+        : weight(ones({dim}, float32)), 
+          eps(eps) {}
+
+    array forward(const array& x) {
+        array variance = mean(square(x), -1, true);
+        return x * rsqrt(variance + eps) * weight;
+    }
+
+    const array& get_weight() const { 
+        return weight; 
+    }
+
+    void set_weight(const array& w) { 
+        weight = w; 
+    }
+}; 

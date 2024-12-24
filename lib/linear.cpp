@@ -1,21 +1,32 @@
-#include "linear.h"
+#pragma once
+
+#include <mlx/mlx.h>
 #include <cmath>
 
-Linear::Linear(int input_dims, int output_dims) 
-    : weight(random::uniform(-std::sqrt(1.0f / input_dims), 
-                           std::sqrt(1.0f / input_dims), 
-                           {output_dims, input_dims},  // Match Python dimensions
-                           bfloat16)) {}  // Use bfloat16 to match Python
+using namespace mlx::core;
 
-array Linear::forward(const array& x) {
-    // Simplified matrix multiplication matching Python
-    return matmul(x, transpose(weight));
-}
+// Linear layer implementation
+class Linear {
+private:
+    array weight;
 
-const array& Linear::get_weight() const { 
-    return weight; 
-}
+public:
+    Linear(int input_dims, int output_dims) 
+        : weight(random::uniform(-std::sqrt(1.0f / input_dims), 
+                               std::sqrt(1.0f / input_dims), 
+                               {output_dims, input_dims},  // Match Python dimensions
+                               bfloat16)) {}  // Use bfloat16 to match Python
 
-void Linear::set_weight(const array& w) { 
-    weight = w; 
-} 
+    array forward(const array& x) {
+        // Simplified matrix multiplication matching Python
+        return matmul(x, transpose(weight));
+    }
+
+    const array& get_weight() const { 
+        return weight; 
+    }
+
+    void set_weight(const array& w) { 
+        weight = w; 
+    }
+}; 

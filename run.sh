@@ -1,1 +1,1 @@
-clang++ -std=c++17 ai.cpp lib/kv_cache.cpp lib/rms_norm.cpp lib/linear.cpp lib/rope.cpp lib/embedding.cpp lib/cross_entropy.cpp lib/feed_forward.cpp lib/model.cpp lib/optimizer.cpp lib/transformer.cpp lib/tokenizer.cpp lib/generator.cpp -o ai -Imlx -L$PWD -lmlx -Wl,-rpath,$PWD && ./ai
+clang++ -std=c++17 ai.cpp -o ai -Imlx -L$PWD -lmlx -Wl,-rpath,$PWD && ./ai

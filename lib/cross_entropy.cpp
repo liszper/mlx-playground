@@ -1,6 +1,12 @@
-#include "cross_entropy.h"
+#pragma once
 
-array cross_entropy(const array& logits, const array& targets, int axis) {
+#include <mlx/mlx.h>
+#include <vector>
+#include <sstream>
+
+using namespace mlx::core;
+
+inline array cross_entropy(const array& logits, const array& targets, int axis = -1) {
     bool targets_as_probs = targets.ndim() == logits.ndim();
     
     // Helper function to drop dimension at specified axis
