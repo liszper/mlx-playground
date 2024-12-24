@@ -36,7 +36,7 @@ private:
     }
     
 public:
-    Generator(TransformerModel& model, Tokenizer& tokenizer, int max_length = 256)
+    Generator(TransformerModel& model, Tokenizer& tokenizer, int max_length = 32)
         : model(model), tokenizer(tokenizer), max_length(max_length) {}
         
     std::string generate(const std::string& prompt) {

@@ -62,6 +62,7 @@ public:
         const array& targets, 
         const array& lengths
     ) override;
+    std::vector<array> state_arrays();
 };
 
 // Implementation
@@ -397,4 +398,29 @@ std::pair<array, std::unordered_map<std::string, array>> TransformerModel::value
     }
     
     return {loss_vec[0], grads};
+}
+
+std::vector<array> TransformerModel::state_arrays() {
+    std::vector<array> arrays;
+    
+    // Add embedding parameters
+    arrays.push_back(embed_tokens->get_weight());
+    
+    // Add layer parameters
+    for (const auto& layer : layers) {
+        auto layer_params = layer->parameters();
+        for (const auto& [_, param] : layer_params) {
+            arrays.push_back(param);
+        }
+    }
+    
+    // Add norm parameters
+    arrays.push_back(norm->get_weight());
+    
+    // Add any cached parameters from _parameters map
+    for (const auto& [_, param] : _parameters) {
+        arrays.push_back(param);
+    }
+    
+    return arrays;
 } 

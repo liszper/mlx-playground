@@ -92,9 +92,35 @@ int main() {
         std::cout << "----------------------------------------" << std::endl;
         float best_loss = std::numeric_limits<float>::max();
         
+        // Pre-allocate vectors and reuse them
+        std::vector<array> state_arrays;
+        state_arrays.reserve(1000);  // Reserve space for arrays
+        
+        // Cache model states to avoid recomputation
+        auto model_states = model.state_arrays();
+        state_arrays.insert(state_arrays.end(), model_states.begin(), model_states.end());
+
         for (int step = 0; step < 20; ++step) {
+            // Clear previous state arrays but maintain capacity
+            state_arrays.clear();
+            
+            // Get loss and gradients in a single pass
             auto [loss, grads] = model.value_and_grad(x, y, z);
+            
+            // Update model parameters immediately
             optimizer->update(model, grads);
+            
+            // Add loss and model states to evaluation batch
+            state_arrays.push_back(loss);
+            state_arrays.insert(state_arrays.end(), model_states.begin(), model_states.end());
+            
+            // Add gradient arrays to evaluation batch
+            for (const auto& [_, param] : grads) {
+                state_arrays.push_back(param);
+            }
+            
+            // Evaluate all arrays at once
+            eval(state_arrays);
             
             float loss_value = loss.item<float>();
             best_loss = std::min(best_loss, loss_value);
@@ -106,8 +132,6 @@ int main() {
                 std::cout << " (best) ⭐";
             }
             std::cout << std::endl;
-            
-            eval({loss});
         }
         std::cout << "----------------------------------------" << std::endl;
         std::cout << "✓ Training complete" << std::endl;

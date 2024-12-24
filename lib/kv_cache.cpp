@@ -34,59 +34,35 @@ public:
             
             if (keys.size() > 0) {
                 if (prev % step != 0) {
-                    array trimmed_keys = slice(keys, {0, 0, 0, 0}, 
-                                            {keys.shape()[0], keys.shape()[1], prev, keys.shape()[3]});
-                    array trimmed_values = slice(values, {0, 0, 0, 0}, 
-                                               {values.shape()[0], values.shape()[1], prev, values.shape()[3]});
-                    keys = trimmed_keys;
-                    values = trimmed_values;
+                    std::vector<int> start = {0, 0, 0, 0};
+                    std::vector<int> stop = {keys.shape()[0], keys.shape()[1], prev, keys.shape()[3]};
+                    keys = slice(keys, start, stop);
+                    values = slice(values, start, stop);
                 }
+                // Retain arrays in memory by using inplace operations
                 keys = concatenate({keys, new_k}, 2);
                 values = concatenate({values, new_v}, 2);
+                eval({keys, values});  // Ensure arrays are evaluated and retained
             } else {
                 keys = new_k;
                 values = new_v;
+                eval({keys, values});
             }
         }
 
-        // Update cache with new keys and values
-        std::vector<array> key_parts;
-        std::vector<array> value_parts;
-
-        // Add existing cache content
-        if (prev > 0) {
-            key_parts.push_back(slice(keys, {0, 0, 0, 0}, 
-                                    {keys.shape()[0], keys.shape()[1], prev, keys.shape()[3]}));
-            value_parts.push_back(slice(values, {0, 0, 0, 0}, 
-                                      {values.shape()[0], values.shape()[1], prev, values.shape()[3]}));
-        }
-
-        // Add new inputs
-        key_parts.push_back(keys_in);
-        value_parts.push_back(values_in);
-
-        // Add remaining cache if any
-        if (keys.shape()[2] > prev + keys_in.shape()[2]) {
-            key_parts.push_back(slice(keys, 
-                                    {0, 0, prev + keys_in.shape()[2], 0}, 
-                                    {keys.shape()[0], keys.shape()[1], keys.shape()[2], keys.shape()[3]}));
-            value_parts.push_back(slice(values, 
-                                      {0, 0, prev + values_in.shape()[2], 0}, 
-                                      {values.shape()[0], values.shape()[1], values.shape()[2], values.shape()[3]}));
-        }
-
-        // Combine all parts
-        keys = concatenate(key_parts, 2);
-        values = concatenate(value_parts, 2);
-        
         offset += keys_in.shape()[2];
         
-        // Return the complete cache up to current offset
+        // Use inplace updates and evaluate immediately
+        keys = slice_update(keys, keys_in, {0, 0, prev, 0}, 
+                          {keys.shape()[0], keys.shape()[1], offset, keys.shape()[3]});
+        values = slice_update(values, values_in, {0, 0, prev, 0},
+                            {values.shape()[0], values.shape()[1], offset, values.shape()[3]});
+        eval({keys, values});
+
+        // Return slices of the cached arrays
         return {
-            slice(keys, {0, 0, 0, 0}, 
-                  {keys.shape()[0], keys.shape()[1], offset, keys.shape()[3]}),
-            slice(values, {0, 0, 0, 0}, 
-                  {values.shape()[0], values.shape()[1], offset, values.shape()[3]})
+            slice(keys, {0, 0, 0, 0}, {keys.shape()[0], keys.shape()[1], offset, keys.shape()[3]}),
+            slice(values, {0, 0, 0, 0}, {values.shape()[0], values.shape()[1], offset, values.shape()[3]})
         };
     }
 }; 
