@@ -10,6 +10,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <chrono>
 
 #include "lib/kv_cache.cpp"
 #include "lib/rms_norm.cpp"
@@ -94,44 +95,64 @@ int main() {
         
         // Pre-allocate vectors and reuse them
         std::vector<array> state_arrays;
-        state_arrays.reserve(1000);  // Reserve space for arrays
-        
+        const size_t total_array_size = 1 + model.state_arrays().size() + model.parameters().size();  // loss + states + params
+        state_arrays.reserve(total_array_size);
+
         // Cache model states to avoid recomputation
         auto model_states = model.state_arrays();
-        state_arrays.insert(state_arrays.end(), model_states.begin(), model_states.end());
 
         for (int step = 0; step < 20; ++step) {
+            auto step_start = std::chrono::high_resolution_clock::now();
+            
             // Clear previous state arrays but maintain capacity
-            state_arrays.clear();
+            state_arrays.clear();  // This keeps the memory allocated
             
-            // Get loss and gradients in a single pass
+            // Time forward + backward pass
+            auto fwd_start = std::chrono::high_resolution_clock::now();
             auto [loss, grads] = model.value_and_grad(x, y, z);
+            auto fwd_end = std::chrono::high_resolution_clock::now();
             
-            // Update model parameters immediately
+            // Time optimizer update
+            auto opt_start = std::chrono::high_resolution_clock::now();
             optimizer->update(model, grads);
+            auto opt_end = std::chrono::high_resolution_clock::now();
             
-            // Add loss and model states to evaluation batch
-            state_arrays.push_back(loss);
-            state_arrays.insert(state_arrays.end(), model_states.begin(), model_states.end());
+            // Time state updates and evaluation
+            auto eval_start = std::chrono::high_resolution_clock::now();
+            state_arrays.push_back(loss);  // Add loss first
             
-            // Add gradient arrays to evaluation batch
+            // Add model states
+            auto current_states = model.state_arrays();
+            state_arrays.insert(state_arrays.end(), current_states.begin(), current_states.end());
+            
+            // Add parameter gradients
             for (const auto& [_, param] : grads) {
                 state_arrays.push_back(param);
             }
             
-            // Evaluate all arrays at once
+            // Evaluate
             eval(state_arrays);
-            
+            auto eval_end = std::chrono::high_resolution_clock::now();
+
             float loss_value = loss.item<float>();
             best_loss = std::min(best_loss, loss_value);
             
+            // Calculate timings in milliseconds
+            auto fwd_time = std::chrono::duration_cast<std::chrono::milliseconds>(fwd_end - fwd_start).count();
+            auto opt_time = std::chrono::duration_cast<std::chrono::milliseconds>(opt_end - opt_start).count();
+            auto eval_time = std::chrono::duration_cast<std::chrono::milliseconds>(eval_end - eval_start).count();
+            auto total_step_time = std::chrono::duration_cast<std::chrono::milliseconds>(eval_end - step_start).count();
+            
             std::cout << "Step " << std::setw(2) << step + 1 << "/20"
                      << " | Loss: " << std::fixed << std::setprecision(6) << loss_value;
-            
             if (loss_value == best_loss) {
-                std::cout << " (best) ⭐";
+                std::cout << " ⭐";
             }
-            std::cout << std::endl;
+            std::cout << "\n  • Forward+Backward: " << fwd_time << "ms"
+                     << " | Optimizer: " << opt_time << "ms"
+                     << " | Eval: " << eval_time << "ms"
+                     << " | Total: " << total_step_time << "ms"
+                     << std::endl;
         }
         std::cout << "----------------------------------------" << std::endl;
         std::cout << "✓ Training complete" << std::endl;
