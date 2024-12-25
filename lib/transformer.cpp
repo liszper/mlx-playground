@@ -67,24 +67,22 @@ public:
 
 // Implementation
 
-TransformerBlock::TransformerBlock(const ModelArgs& args) : 
-    num_attention_heads(args.num_attention_heads),
-    num_kv_heads(args.num_key_value_heads),
-    head_dim(args.hidden_size / args.num_attention_heads),
-    hidden_size(args.hidden_size),
-    scale(std::sqrt(1.0f / head_dim)) {
-    
-    // Initialize projections
+TransformerBlock::TransformerBlock(const ModelArgs& args) {
+    // Calculate dimensions and scale in member initializer list
+    num_attention_heads = args.num_attention_heads;
+    num_kv_heads = args.num_key_value_heads;
+    hidden_size = args.hidden_size;
+    head_dim = hidden_size / num_attention_heads;
+    scale = 1.0f / std::sqrt(head_dim);
+
+    // Initialize all components in a single batch
     q_proj = std::make_unique<Linear>(hidden_size, num_attention_heads * head_dim);
     k_proj = std::make_unique<Linear>(hidden_size, num_kv_heads * head_dim);
     v_proj = std::make_unique<Linear>(hidden_size, num_kv_heads * head_dim);
     o_proj = std::make_unique<Linear>(num_attention_heads * head_dim, hidden_size);
     
-    // Initialize layer norms
     input_layernorm = std::make_unique<RMSNorm>(hidden_size);
     post_attention_layernorm = std::make_unique<RMSNorm>(hidden_size);
-    
-    // Initialize feed forward network and RoPE
     mlp = std::make_unique<FeedForward>(args);
     rope = std::make_unique<RoPE>(head_dim);
 }
@@ -93,142 +91,121 @@ array TransformerBlock::forward(const array& x, KVCache* cache) {
     // Apply input layer norm
     array h = input_layernorm->forward(x);
     
-    // Get batch size and sequence length
-    int B = h.shape()[0];
-    int L = h.shape()[1];
+    // Get dimensions once
+    const auto& shape = h.shape();
+    int B = shape[0];
+    int L = shape[1];
     
-    // Project to Q, K, V
-    array queries = q_proj->forward(h);
-    array keys = k_proj->forward(h);
-    array values = v_proj->forward(h);
+    // 1. Batch all projections together for better parallelization
+    std::vector<array> projections = {
+        q_proj->forward(h),
+        k_proj->forward(h),
+        v_proj->forward(h)
+    };
+    eval(projections);  // Force immediate evaluation
     
-    // Reshape to separate heads
-    queries = reshape(queries, {B, L, num_attention_heads, head_dim});
-    keys = reshape(keys, {B, L, num_kv_heads, head_dim});
-    values = reshape(values, {B, L, num_kv_heads, head_dim});
+    // 2. Optimize reshape and transpose operations
+    array queries = reshape(projections[0], {B, L, num_attention_heads, head_dim});
+    array keys = reshape(projections[1], {B, L, num_kv_heads, head_dim});
+    array values = reshape(projections[2], {B, L, num_kv_heads, head_dim});
     
-    // Transpose for attention computation
-    queries = transpose(queries, {0, 2, 1, 3}); // [B, num_heads, L, head_dim]
-    keys = transpose(keys, {0, 2, 1, 3});       // [B, num_kv_heads, L, head_dim]
-    values = transpose(values, {0, 2, 1, 3});   // [B, num_kv_heads, L, head_dim]
+    // 3. Batch transpose operations
+    std::vector<array> transposed = {
+        transpose(queries, {0, 2, 1, 3}),
+        transpose(keys, {0, 2, 1, 3}),
+        transpose(values, {0, 2, 1, 3})
+    };
+    eval(transposed);  // Force immediate evaluation
+    queries = transposed[0];
+    keys = transposed[1];
+    values = transposed[2];
     
-    // Apply RoPE
+    // 4. Optimize RoPE application and cache handling
     if (cache) {
         queries = rope->forward(queries, cache->offset);
         keys = rope->forward(keys, cache->offset);
-        // Update cache and get full keys/values
-        auto [cached_keys, cached_values] = cache->update_and_fetch(keys, values);
-        keys = cached_keys;
-        values = cached_values;
+        std::tie(keys, values) = cache->update_and_fetch(keys, values);
     } else {
         queries = rope->forward(queries);
         keys = rope->forward(keys);
     }
+    eval({queries, keys, values});  // Force immediate evaluation
     
-    // Repeat keys and values if num_kv_heads < num_attention_heads
+    // 5. Optimize KV head repeat using concatenate
     if (num_kv_heads < num_attention_heads) {
-        int repeat_factor = num_attention_heads / num_kv_heads;
-        std::vector<array> repeated_keys(repeat_factor, keys);
-        std::vector<array> repeated_values(repeat_factor, values);
-        keys = concatenate(repeated_keys, 1);
-        values = concatenate(repeated_values, 1);
+        const int repeat_factor = num_attention_heads / num_kv_heads;
+        keys = repeat(keys, 1, repeat_factor);
+        values = repeat(values, 1, repeat_factor);
+        eval({keys, values});
     }
     
-    // Compute scaled dot-product attention
-    array attn_weights = matmul(queries, transpose(keys, {0, 1, 3, 2})) * scale;
+    // 6. Compute attention and reshape in one step
+    array attn_output = mlx::core::fast::scaled_dot_product_attention(
+        queries, keys, values, scale, std::nullopt
+    );
+    eval({attn_output});
     
-    // Apply softmax
-    attn_weights = softmax(attn_weights, -1);
+    // 7. Optimize final transformations
+    attn_output = reshape(transpose(attn_output, {0, 2, 1, 3}), 
+                         {B, L, num_attention_heads * head_dim});
+    array output = o_proj->forward(attn_output) + x;
+    eval({output});
     
-    // Compute attention output
-    array attn_output = matmul(attn_weights, values);
+    // 8. Final layer norm and MLP with forced evaluation
+    array final_output = output + mlp->forward(post_attention_layernorm->forward(output));
+    eval({final_output});
     
-    // Reshape and transpose back
-    attn_output = transpose(attn_output, {0, 2, 1, 3});
-    attn_output = reshape(attn_output, {B, L, num_attention_heads * head_dim});
-    
-    // Project to output dimension
-    array output = o_proj->forward(attn_output);
-    
-    // First residual connection
-    output = output + x;
-    
-    // Apply post attention layer norm
-    array h2 = post_attention_layernorm->forward(output);
-    
-    // Feed forward network
-    array ff_output = mlp->forward(h2);
-    
-    // Second residual connection
-    return output + ff_output;
+    return final_output;
 }
 
 std::unordered_map<std::string, array> TransformerBlock::parameters() {
     std::unordered_map<std::string, array> params;
+    params.reserve(8);  // Reserve space for typical number of parameters
     
-    // Add parameters using emplace
-    params.emplace(std::piecewise_construct,
-                  std::forward_as_tuple("q_proj.weight"),
-                  std::forward_as_tuple(q_proj->get_weight()));
-    params.emplace(std::piecewise_construct,
-                  std::forward_as_tuple("k_proj.weight"),
-                  std::forward_as_tuple(k_proj->get_weight()));
-    params.emplace(std::piecewise_construct,
-                  std::forward_as_tuple("v_proj.weight"),
-                  std::forward_as_tuple(v_proj->get_weight()));
-    params.emplace(std::piecewise_construct,
-                  std::forward_as_tuple("o_proj.weight"),
-                  std::forward_as_tuple(o_proj->get_weight()));
-    params.emplace(std::piecewise_construct,
-                  std::forward_as_tuple("input_layernorm.weight"),
-                  std::forward_as_tuple(input_layernorm->get_weight()));
-    params.emplace(std::piecewise_construct,
-                  std::forward_as_tuple("post_attention_layernorm.weight"),
-                  std::forward_as_tuple(post_attention_layernorm->get_weight()));
+    // Use emplace instead of insert for better performance
+    params.emplace("q_proj.weight", q_proj->get_weight());
+    params.emplace("k_proj.weight", k_proj->get_weight());
+    params.emplace("v_proj.weight", v_proj->get_weight());
+    params.emplace("o_proj.weight", o_proj->get_weight());
+    params.emplace("input_layernorm.weight", input_layernorm->get_weight());
+    params.emplace("post_attention_layernorm.weight", post_attention_layernorm->get_weight());
     
-    // Add MLP parameters
+    // Merge MLP parameters efficiently
     auto mlp_params = mlp->parameters();
-    for (const auto& [name, param] : mlp_params) {
-        params.emplace(std::piecewise_construct,
-                     std::forward_as_tuple(name),
-                     std::forward_as_tuple(param));
+    for (auto&& [name, param] : mlp_params) {
+        params.emplace(std::move(name), std::move(param));
     }
     
     return params;
 }
 
 void TransformerBlock::set_parameters(const std::unordered_map<std::string, array>& params) {
-    auto it = params.find("q_proj.weight");
-    if (it != params.end()) {
+    // Use structured bindings and find() for cleaner, efficient lookups
+    if (auto it = params.find("q_proj.weight"); it != params.end()) {
         q_proj->set_weight(it->second);
     }
     
-    it = params.find("k_proj.weight");
-    if (it != params.end()) {
+    if (auto it = params.find("k_proj.weight"); it != params.end()) {
         k_proj->set_weight(it->second);
     }
     
-    it = params.find("v_proj.weight");
-    if (it != params.end()) {
+    if (auto it = params.find("v_proj.weight"); it != params.end()) {
         v_proj->set_weight(it->second);
     }
     
-    it = params.find("o_proj.weight");
-    if (it != params.end()) {
+    if (auto it = params.find("o_proj.weight"); it != params.end()) {
         o_proj->set_weight(it->second);
     }
     
-    it = params.find("input_layernorm.weight");
-    if (it != params.end()) {
+    if (auto it = params.find("input_layernorm.weight"); it != params.end()) {
         input_layernorm->set_weight(it->second);
     }
     
-    it = params.find("post_attention_layernorm.weight");
-    if (it != params.end()) {
+    if (auto it = params.find("post_attention_layernorm.weight"); it != params.end()) {
         post_attention_layernorm->set_weight(it->second);
     }
     
-    // Update MLP parameters
+    // Update MLP parameters in batch
     mlp->set_parameters(params);
 }
 
@@ -264,21 +241,37 @@ TransformerModel::TransformerModel() {
 
 array TransformerModel::forward(const array& inputs, std::vector<KVCache*>* cache) {
     try {
-        // First embed the tokens
-        array h = embed_tokens->forward(inputs);
+        // 1. Pre-allocate vectors for batched operations
+        const auto& shape = inputs.shape();
+        const int batch_size = shape[0];
+        const int seq_len = shape[1];
+        std::vector<array> layer_outputs;
+        layer_outputs.reserve(layers.size() + 2);  // +2 for embedding and final norm
         
-        // Process through transformer layers
+        // 2. Optimize embedding with immediate evaluation
+        array h = embed_tokens->forward(inputs);
+        eval({h});
+        layer_outputs.push_back(h);
+        
+        // 3. Process through transformer layers with batched evaluation
         for (size_t i = 0; i < layers.size(); i++) {
             h = layers[i]->forward(h, cache ? (*cache)[i] : nullptr);
+            layer_outputs.push_back(h);
+            
+            // Evaluate every N layers (e.g., 4) to balance memory and parallelism
+            if (i % 4 == 3 || i == layers.size() - 1) {
+                eval(layer_outputs);
+                layer_outputs.clear();
+            }
         }
         
-        // Final normalization
+        // 4. Final normalization and projection with optimized memory usage
         h = norm->forward(h);
-        
-        // Project to vocabulary
         array output = embed_tokens->as_linear(h);
+        eval({output});
         
         return output;
+        
     } catch (const std::exception& e) {
         std::cerr << "Error in forward pass: " << e.what() << std::endl;
         throw;
@@ -286,61 +279,65 @@ array TransformerModel::forward(const array& inputs, std::vector<KVCache*>* cach
 }
 
 std::unordered_map<std::string, array>& TransformerModel::parameters() {
-    // Clear existing parameters
+    // Clear existing parameters with known capacity
     _parameters.clear();
+    _parameters.reserve(layers.size() * 8 + 2);  // Approximate size based on typical layer params
     
-    // Add embedding parameters
-    _parameters.insert({"embed_tokens.weight", embed_tokens->get_weight()});
+    // Add embedding parameters with direct insertion
+    _parameters.emplace("embed_tokens.weight", embed_tokens->get_weight());
     
-    // Add layer parameters
+    // Add layer parameters efficiently
     for (size_t i = 0; i < layers.size(); i++) {
-        auto layer_params = layers[i]->parameters();
+        const auto& layer_params = layers[i]->parameters();
+        const std::string layer_prefix = "layers." + std::to_string(i) + ".";
+        
+        // Pre-compute prefix to avoid repeated string concatenations
         for (const auto& [name, param] : layer_params) {
-            _parameters.insert({"layers." + std::to_string(i) + "." + name, param});
+            _parameters.emplace(layer_prefix + name, param);
         }
     }
     
     // Add norm parameters
-    _parameters.insert({"norm.weight", norm->get_weight()});
+    _parameters.emplace("norm.weight", norm->get_weight());
     
     return _parameters;
 }
 
 void TransformerModel::set_parameters(const std::unordered_map<std::string, array>& params) {
-    // Store the parameters
-    for (const auto& [name, param] : params) {
-        _parameters.insert_or_assign(name, param);
-    }
-    
     // Update embedding layer
-    if (params.find("embed_tokens.weight") != params.end()) {
-        embed_tokens->set_weight(params.at("embed_tokens.weight"));
+    auto embed_it = params.find("embed_tokens.weight");
+    if (embed_it != params.end()) {
+        embed_tokens->set_weight(embed_it->second);
     }
     
-    // Update transformer layers
+    // Update transformer layers efficiently
     for (size_t i = 0; i < layers.size(); i++) {
-        std::string layer_prefix = "layers." + std::to_string(i) + ".";
+        const std::string layer_prefix = "layers." + std::to_string(i) + ".";
+        const size_t prefix_len = layer_prefix.length();
+        
+        // Create layer params map only if needed
         std::unordered_map<std::string, array> layer_params;
         
-        // Collect all parameters for this layer
+        // Single pass through params for this layer
         for (const auto& [name, param] : params) {
-            if (name.find(layer_prefix) == 0) {
-                // Remove the layer prefix to get the parameter name
-                std::string param_name = name.substr(layer_prefix.length());
-                layer_params.insert_or_assign(param_name, param);
+            if (name.compare(0, prefix_len, layer_prefix) == 0) {
+                layer_params.emplace(name.substr(prefix_len), param);
             }
         }
         
-        // Update layer parameters
         if (!layer_params.empty()) {
             layers[i]->set_parameters(layer_params);
         }
     }
     
-    // Update final normalization layer
-    if (params.find("norm.weight") != params.end()) {
-        norm->set_weight(params.at("norm.weight"));
+    // Update final norm layer
+    auto norm_it = params.find("norm.weight");
+    if (norm_it != params.end()) {
+        norm->set_weight(norm_it->second);
     }
+    
+    // Store all parameters
+    _parameters = params;
 }
 
 const ModelArgs& TransformerModel::get_args() const { 
@@ -401,23 +398,10 @@ std::pair<array, std::unordered_map<std::string, array>> TransformerModel::value
 }
 
 std::vector<array> TransformerModel::state_arrays() {
+    // Just return the parameters we're actually using
     std::vector<array> arrays;
+    arrays.reserve(_parameters.size());  // Pre-allocate space
     
-    // Add embedding parameters
-    arrays.push_back(embed_tokens->get_weight());
-    
-    // Add layer parameters
-    for (const auto& layer : layers) {
-        auto layer_params = layer->parameters();
-        for (const auto& [_, param] : layer_params) {
-            arrays.push_back(param);
-        }
-    }
-    
-    // Add norm parameters
-    arrays.push_back(norm->get_weight());
-    
-    // Add any cached parameters from _parameters map
     for (const auto& [_, param] : _parameters) {
         arrays.push_back(param);
     }

@@ -29,48 +29,50 @@ public:
         const array& targets, 
         const array& lengths
     ) {
-        // Create a wrapper function that captures model state and converts between parameter formats
-        auto model_ptr = this;
-        
-        // Convert parameters map to vector more efficiently
-        auto& params = parameters();  // Use reference to avoid copy
+        // Optimize parameter conversion
+        auto& params = parameters();
         std::vector<array> param_vec;
         std::vector<std::string> param_names;
-        param_vec.reserve(params.size());  // Pre-allocate
+        param_vec.reserve(params.size());
         param_names.reserve(params.size());
         
+        // Single pass through parameters
         for (const auto& [name, param] : params) {
             param_names.push_back(name);
             param_vec.push_back(param);
         }
         
-        // Create loss function that works with vectors and returns vector
-        std::function<std::vector<array>(const std::vector<array>&)> loss_fn = 
-            [model_ptr, &inputs, &targets, &lengths, &param_names](const std::vector<array>& params) -> std::vector<array> {
-                // Reconstruct parameter map more efficiently
-                std::unordered_map<std::string, array> param_map;
-                param_map.reserve(params.size());  // Pre-allocate
-                for (size_t i = 0; i < params.size(); i++) {
-                    param_map.emplace(param_names[i], params[i]);
-                }
-                model_ptr->set_parameters(param_map);
-                
-                // Return loss directly without creating temporary vectors
-                return {cross_entropy_loss(*model_ptr, inputs, targets, lengths).loss};
-            };
+        // Efficient loss function
+        auto loss_fn = [this, &inputs, &targets, &lengths, &param_names](
+            const std::vector<array>& params
+        ) -> std::vector<array> {
+            // Reconstruct parameters efficiently
+            std::unordered_map<std::string, array> param_map;
+            param_map.reserve(params.size());
+            
+            for (size_t i = 0; i < params.size(); i++) {
+                param_map.emplace(param_names[i], params[i]);
+            }
+            
+            set_parameters(param_map);
+            auto loss_result = cross_entropy_loss(*this, inputs, targets, lengths);
+            return {loss_result.loss};
+        };
         
-        // Optimize param_indices creation
+        // Generate parameter indices efficiently
         std::vector<int> param_indices(param_vec.size());
-        std::iota(param_indices.begin(), param_indices.end(), 0);  // More efficient than loop
+        std::iota(param_indices.begin(), param_indices.end(), 0);
         
+        // Compute gradients
         auto value_and_grad_fn = mlx::core::value_and_grad(loss_fn, param_indices);
-        auto [loss_vec, grad_vec] = value_and_grad_fn(param_vec);  // Use structured binding
+        auto [loss_vec, grad_vec] = value_and_grad_fn(param_vec);
         
-        // Convert gradient vector back to map more efficiently
+        // Convert gradients to map efficiently
         std::unordered_map<std::string, array> grads;
-        grads.reserve(grad_vec.size());  // Pre-allocate
+        grads.reserve(grad_vec.size());
+        
         for (size_t i = 0; i < grad_vec.size(); i++) {
-            grads.emplace(param_names[i], std::move(grad_vec[i]));  // Use move semantics
+            grads.emplace(param_names[i], grad_vec[i]);
         }
         
         return {loss_vec[0], grads};

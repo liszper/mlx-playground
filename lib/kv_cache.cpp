@@ -42,11 +42,9 @@ public:
                 // Retain arrays in memory by using inplace operations
                 keys = concatenate({keys, new_k}, 2);
                 values = concatenate({values, new_v}, 2);
-                eval({keys, values});  // Ensure arrays are evaluated and retained
             } else {
                 keys = new_k;
                 values = new_v;
-                eval({keys, values});
             }
         }
 
@@ -57,7 +55,6 @@ public:
                           {keys.shape()[0], keys.shape()[1], offset, keys.shape()[3]});
         values = slice_update(values, values_in, {0, 0, prev, 0},
                             {values.shape()[0], values.shape()[1], offset, values.shape()[3]});
-        eval({keys, values});
 
         // Return slices of the cached arrays
         return {
