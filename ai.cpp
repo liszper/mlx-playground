@@ -104,54 +104,43 @@ int main() {
         for (int step = 0; step < 20; ++step) {
             auto step_start = std::chrono::high_resolution_clock::now();
             
-            // Clear previous state arrays but maintain capacity
-            state_arrays.clear();  // This keeps the memory allocated
-            
-            // Time forward + backward pass
-            auto fwd_start = std::chrono::high_resolution_clock::now();
+            // Forward + backward pass
+            auto fwd_bwd_start = std::chrono::high_resolution_clock::now();
             auto [loss, grads] = model.value_and_grad(x, y, z);
-            auto fwd_end = std::chrono::high_resolution_clock::now();
+            eval({loss}); // Evaluate loss immediately
+            auto fwd_bwd_end = std::chrono::high_resolution_clock::now();
             
-            // Time optimizer update
-            auto opt_start = std::chrono::high_resolution_clock::now();
+            // Optimizer update
+            auto optim_start = std::chrono::high_resolution_clock::now();
             optimizer->update(model, grads);
-            auto opt_end = std::chrono::high_resolution_clock::now();
+            eval(model.state_arrays()); // Evaluate model state immediately
+            auto optim_end = std::chrono::high_resolution_clock::now();
             
-            // Time state updates and evaluation
-            auto eval_start = std::chrono::high_resolution_clock::now();
-            state_arrays.push_back(loss);  // Add loss first
-            
-            // Add model states
-            auto current_states = model.state_arrays();
-            state_arrays.insert(state_arrays.end(), current_states.begin(), current_states.end());
-            
-            // Add parameter gradients
+            // Remaining evaluations
+            auto remaining_start = std::chrono::high_resolution_clock::now();
             for (const auto& [_, param] : grads) {
-                state_arrays.push_back(param);
+                eval(param);
             }
+            auto remaining_end = std::chrono::high_resolution_clock::now();
             
-            // Evaluate
-            eval(state_arrays);
-            auto eval_end = std::chrono::high_resolution_clock::now();
-
             float loss_value = loss.item<float>();
             best_loss = std::min(best_loss, loss_value);
             
             // Calculate timings in milliseconds
-            auto fwd_time = std::chrono::duration_cast<std::chrono::milliseconds>(fwd_end - fwd_start).count();
-            auto opt_time = std::chrono::duration_cast<std::chrono::milliseconds>(opt_end - opt_start).count();
-            auto eval_time = std::chrono::duration_cast<std::chrono::milliseconds>(eval_end - eval_start).count();
-            auto total_step_time = std::chrono::duration_cast<std::chrono::milliseconds>(eval_end - step_start).count();
+            auto fwd_bwd_time = std::chrono::duration_cast<std::chrono::milliseconds>(fwd_bwd_end - fwd_bwd_start).count();
+            auto optim_time = std::chrono::duration_cast<std::chrono::milliseconds>(optim_end - optim_start).count();
+            auto remaining_time = std::chrono::duration_cast<std::chrono::milliseconds>(remaining_end - remaining_start).count();
+            auto total_time = std::chrono::duration_cast<std::chrono::milliseconds>(remaining_end - step_start).count();
             
             std::cout << "Step " << std::setw(2) << step + 1 << "/20"
                      << " | Loss: " << std::fixed << std::setprecision(6) << loss_value;
             if (loss_value == best_loss) {
                 std::cout << " ⭐";
             }
-            std::cout << "\n  • Forward+Backward: " << fwd_time << "ms"
-                     << " | Optimizer: " << opt_time << "ms"
-                     << " | Eval: " << eval_time << "ms"
-                     << " | Total: " << total_step_time << "ms"
+            std::cout << "\n  • Forward+Backward: " << fwd_bwd_time << "ms"
+                     << " | Optimizer: " << optim_time << "ms"
+                     << " | Remaining eval: " << remaining_time << "ms"
+                     << " | Total: " << total_time << "ms"
                      << std::endl;
         }
         std::cout << "----------------------------------------" << std::endl;

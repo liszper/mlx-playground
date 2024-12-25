@@ -21,8 +21,8 @@ private:
     float eps;
     float weight_decay;
     int step;
-    std::unordered_map<std::string, array> m;
-    std::unordered_map<std::string, array> v;
+    std::unordered_map<std::string, std::optional<array>> m;
+    std::unordered_map<std::string, std::optional<array>> v;
 
 public:
     AdamW(float lr = 1e-5, float b1 = 0.9f, float b2 = 0.999f, float eps = 1e-8f, float wd = 0.01f)
@@ -35,53 +35,63 @@ public:
         step++;
         auto& params = model.parameters();
         
-        const size_t BATCH_SIZE = 128;
-        std::vector<array> arrays_to_eval;
-        arrays_to_eval.reserve(BATCH_SIZE * 3);
+        // Pre-allocate all arrays we'll need
+        std::vector<array> all_updates;
+        all_updates.reserve(gradients.size() * 3);  // m, v, and param updates
         
-        std::unordered_map<std::string, array> new_params;
+        // Use optional for new_params as well
+        std::unordered_map<std::string, std::optional<array>> new_params;
         new_params.reserve(params.size());
         
+        // Batch all operations
         for (const auto& [name, grad] : gradients) {
             auto param_it = params.find(name);
             if (param_it == params.end()) continue;
             
+            // Initialize momentum arrays if needed
             auto m_it = m.find(name);
-            if (m_it == m.end()) {
-                array m_init = zeros_like(grad);
-                array v_init = zeros_like(grad);
-                eval({m_init, v_init});
-                m_it = m.emplace(name, std::move(m_init)).first;
-                v.emplace(name, std::move(v_init));
+            if (m_it == m.end() || !m_it->second.has_value()) {
+                m[name] = zeros_like(grad);
+                v[name] = zeros_like(grad);
             }
             
+            // Compute all updates in one go
             array& param = param_it->second;
-            array new_m = beta1 * m_it->second + (1.0f - beta1) * grad;
-            array new_v = beta2 * v.at(name) + (1.0f - beta2) * square(grad);
+            array& m_val = m[name].value();
+            array& v_val = v[name].value();
             
-            array param_update = learning_rate * new_m / (sqrt(new_v) + eps);
-            array new_param = weight_decay > 0.0f 
+            // Use MLX's stream operations to chain computations
+            auto new_m = beta1 * m_val + (1.0f - beta1) * grad;
+            auto new_v = beta2 * v_val + (1.0f - beta2) * square(grad);
+            auto param_update = learning_rate * new_m / (sqrt(new_v) + eps);
+            auto new_param = weight_decay > 0.0f 
                 ? param * (1.0f - learning_rate * weight_decay) - param_update
                 : param - param_update;
             
-            arrays_to_eval.push_back(new_m);
-            arrays_to_eval.push_back(new_v);
-            arrays_to_eval.push_back(new_param);
+            // Store updates
+            m[name] = new_m;
+            v[name] = new_v;
+            new_params[name] = new_param;
             
-            m.insert_or_assign(name, new_m);
-            v.insert_or_assign(name, new_v);
-            new_params.insert_or_assign(name, new_param);
-            
-            if (arrays_to_eval.size() >= BATCH_SIZE * 3) {
-                eval(arrays_to_eval);
-                arrays_to_eval.clear();
+            // Add to evaluation batch
+            all_updates.push_back(new_m);
+            all_updates.push_back(new_v);
+            all_updates.push_back(new_param);
+        }
+        
+        // Single evaluation for all updates
+        eval(all_updates);
+        
+        // Convert new_params back to regular map before updating model
+        std::unordered_map<std::string, array> final_params;
+        final_params.reserve(new_params.size());
+        for (const auto& [name, param_opt] : new_params) {
+            if (param_opt.has_value()) {
+                final_params.emplace(name, param_opt.value());
             }
         }
         
-        if (!arrays_to_eval.empty()) {
-            eval(arrays_to_eval);
-        }
-        
-        model.set_parameters(new_params);
+        // Update model parameters
+        model.set_parameters(final_params);
     }
 }; 

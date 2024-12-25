@@ -679,6 +679,8 @@ def value_and_grad(model: Module, fn: Callable):
     return wrapped_value_grad_fn
 
 def main():
+    import time
+
     model = Model("bf16")
     tokenizer = Tokenizer("./tokenizer.model")
     detokenizer = Detokenizer(tokenizer)
@@ -696,10 +698,31 @@ def main():
     loss_value_and_grad = value_and_grad(model, cross_entropy_loss)
 
     for step in range(20):
+        # Time forward + backward
+        t0 = time.perf_counter()
         (loss, ntoks), grad = loss_value_and_grad(model, x, y, z)
+        # Evaluate immediately to get accurate timing
+        mx.eval([loss, ntoks, grad])
+        t1 = time.perf_counter()
+        
+        # Time optimizer
+        t2 = time.perf_counter()
         optimizer.update(model, grad)
-        mx.eval(state, loss, ntoks)
-        print(f"loss: {loss.item()}")
+        # Evaluate optimizer updates
+        mx.eval(model.state)
+        t3 = time.perf_counter()
+        
+        # Time any remaining evals
+        t4 = time.perf_counter()
+        mx.eval(optimizer.state)
+        t5 = time.perf_counter()
+
+        print(f"Step {step}:")
+        print(f"  loss: {loss.item():.4f}")
+        print(f"  forward+backward: {(t1-t0)*1000:.2f}ms")
+        print(f"  optimizer: {(t3-t2)*1000:.2f}ms")
+        print(f"  remaining eval: {(t5-t4)*1000:.2f}ms")
+        print(f"  total: {(t5-t0)*1000:.2f}ms")
 
     generate(model, tokenizer, detokenizer, prompt="Már nem volt fiatal, de még")
 
